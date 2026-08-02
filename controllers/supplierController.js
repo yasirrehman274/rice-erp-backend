@@ -1,7 +1,15 @@
 import Supplier from "../models/Supplier.js";
 
 function sanitizeBody(body = {}) {
+  const { id, _id, currentBalance, totalPurchases, totalPaid, ...rest } = body;
+  return rest;
+}
+
+function sanitizeCreateBody(body = {}) {
   const { id, _id, ...rest } = body;
+  if (!("currentBalance" in body) && Number(body.openingBalance) > 0) {
+    rest.currentBalance = Number(body.openingBalance);
+  }
   return rest;
 }
 
@@ -26,7 +34,7 @@ export async function getSupplierById(req, res) {
 
 export async function createSupplier(req, res) {
   const { id } = req.body;
-  const supplier = await Supplier.create({ _id: id, ...sanitizeBody(req.body) });
+  const supplier = await Supplier.create({ _id: id, ...sanitizeCreateBody(req.body) });
   res.status(201).json(supplier);
 }
 
