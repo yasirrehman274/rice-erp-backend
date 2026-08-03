@@ -4,6 +4,19 @@ const STATUSES = ["pending", "dispatched", "partial", "cancelled"];
 const PAYMENT_STATUSES = ["unpaid", "partial", "paid"];
 const PAYMENT_METHODS = ["cash", "bank", "cheque", "online"];
 
+const paymentSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true },
+    saleId: { type: String, required: true },
+    date: { type: String, required: true },
+    amount: { type: Number, required: true, min: 0 },
+    method: { type: String, enum: PAYMENT_METHODS, required: true },
+    reference: { type: String, required: true },
+    notes: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
 const saleSchema = new mongoose.Schema(
   {
     _id: { type: String, required: [true, "Sale id is required."] },
@@ -36,6 +49,7 @@ const saleSchema = new mongoose.Schema(
     otherCharges: { type: Number, default: 0 },
     grandTotal: { type: Number, default: 0, min: 0 },
     receivedAmount: { type: Number, default: 0, min: 0 },
+    payments: { type: [paymentSchema], default: [] },
     remainingBalance: { type: Number, default: 0, min: 0 },
     paymentMethod: {
       type: String,

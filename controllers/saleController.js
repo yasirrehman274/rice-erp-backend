@@ -12,8 +12,22 @@ import {
 } from "./stockHelpers.js";
 
 function sanitizeBody(body = {}) {
-  const { id, _id, customerName, warehouseName, productName, ...rest } = body;
+  const { id, _id, customerName, warehouseName, productName, payments, ...rest } = body;
   return rest;
+}
+
+function legacyPayments(sale) {
+  if (Array.isArray(sale.payments) && sale.payments.length > 0) return sale.payments;
+  if (sale.receivedAmount <= 0) return [];
+  return [{
+    id: `pay-${sale._id}-initial`,
+    saleId: sale._id,
+    date: sale.saleDate,
+    amount: sale.receivedAmount,
+    method: sale.paymentMethod,
+    reference: `PAY-${sale.saleNumber.slice(-4)}-INITIAL`,
+    notes: "Initial payment received.",
+  }];
 }
 
 async function resolveNames(body) {
@@ -123,7 +137,12 @@ export async function createSale(req, res) {
   const { id } = req.body;
   const body = sanitizeBody(req.body);
   const names = await resolveNames(body);
-  const sale = await Sale.create({ _id: id, ...body, ...names });
+  const initialReceived = Number(body.receivedAmount) || 0;
+  const payments = initialReceived > 0 ? [{
+    id: `pay-${id}-initial`, saleId: id, date: body.saleDate, amount: initialReceived,
+    method: body.paymentMethod ?? "cash", reference: `PAY-${String(body.saleNumber).slice(-4)}-INITIAL`, notes: "Initial payment received.",
+  }] : [];
+  const sale = await Sale.create({ _id: id, ...body, ...names, payments });
   await applySale(sale);
   res.status(201).json(sale);
 }
@@ -166,34 +185,7 @@ export async function getSalePayments(req, res) {
   if (!sale) {
     return res.status(404).json({ message: "Sale not found." });
   }
-  const payments = [];
-  if (sale.receivedAmount === 0) return res.status(200).json(payments);
-  let remaining = sale.receivedAmount;
-  if (remaining >= sale.grandTotal * 0.5) {
-    const firstAmount = Math.round(sale.grandTotal * 0.5);
-    payments.push({
-      id: `pay-${sale._id}-01`,
-      saleId: sale._id,
-      date: sale.saleDate,
-      amount: firstAmount,
-      method: sale.paymentMethod,
-      reference: `PAY-${sale.saleNumber.slice(-4)}-01`,
-      notes: "Initial advance received.",
-    });
-    remaining -= firstAmount;
-  }
-  if (remaining > 0) {
-    payments.push({
-      id: `pay-${sale._id}-02`,
-      saleId: sale._id,
-      date: sale.updatedAt,
-      amount: remaining,
-      method: sale.paymentMethod,
-      reference: `PAY-${sale.saleNumber.slice(-4)}-02`,
-      notes: "Balance payment received.",
-    });
-  }
-  res.status(200).json(payments);
+  res.status(200).json(legacyPayments(sale));
 }
 
 export async function addSalePayment(req, res) {
@@ -211,6 +203,15 @@ export async function addSalePayment(req, res) {
   }
   const receivedAmount = sale.receivedAmount + numAmount;
   const paymentStatus = receivedAmount >= sale.grandTotal ? "paid" : "partial";
+  const payments = [...legacyPayments(sale), {
+    id: `pay-${sale._id}-${Date.now()}`,
+    saleId: sale._id,
+    date: today(),
+    amount: numAmount,
+    method,
+    reference: `PAY-${sale.saleNumber.slice(-4)}-${legacyPayments(sale).length + 1}`,
+    notes,
+  }];
   const updated = await Sale.findByIdAndUpdate(
     sale._id,
     {
@@ -219,6 +220,7 @@ export async function addSalePayment(req, res) {
         remainingBalance: sale.grandTotal - receivedAmount,
         paymentStatus,
         paymentMethod: method,
+        payments,
         notes: sale.notes,
         updatedAt: today(),
       },

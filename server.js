@@ -10,6 +10,7 @@ import inventoryRoutes from "./routes/inventoryRoutes.js";
 import purchaseRoutes from "./routes/purchaseRoutes.js";
 import saleRoutes from "./routes/saleRoutes.js";
 import expenseRoutes from "./routes/expenseRoutes.js";
+import productionRoutes from "./routes/productionRoutes.js";
 import reportRoutes from "./routes/reportRoutes.js";
 import { notFoundHandler, errorHandler } from "./middleware/errorHandler.js";
 
@@ -35,6 +36,7 @@ app.use("/api/inventory", inventoryRoutes);
 app.use("/api/purchases", purchaseRoutes);
 app.use("/api/sales", saleRoutes);
 app.use("/api/expenses", expenseRoutes);
+app.use("/api/productions", productionRoutes);
 app.use("/api/reports", reportRoutes);
 
 app.use(notFoundHandler);
