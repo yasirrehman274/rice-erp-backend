@@ -30,6 +30,13 @@ function legacyPayments(sale) {
   }];
 }
 
+function paymentBasedStatus(sale) {
+  if (sale.status === "cancelled") return "cancelled";
+  if (sale.grandTotal > 0 && sale.receivedAmount >= sale.grandTotal) return "paid";
+  if (sale.receivedAmount > 0) return "partial";
+  return sale.status;
+}
+
 async function resolveNames(body) {
   const [customer, warehouse, product] = await Promise.all([
     body.customerId ? Customer.findById(body.customerId).lean() : null,
@@ -43,25 +50,90 @@ async function resolveNames(body) {
   };
 }
 
+async function normalizeItems(body) {
+  const raw = Array.isArray(body.items) && body.items.length > 0 ? body.items : null;
+  if (!raw) return null;
+  const ids = [...new Set(raw.map((item) => item.productId).filter(Boolean))];
+  const products = await Product.find({ _id: { $in: ids } }).lean();
+  const names = new Map(products.map((product) => [product._id, product.productName]));
+  return raw.map((item) => {
+    const quantity = Number(item.quantity) || 0;
+    const bagWeight = Number(item.bagWeight) || 0;
+    const price = Number(item.currentSalePrice) || 0;
+    return {
+      id: item.id || `itm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      productId: item.productId ?? "",
+      productName: names.get(item.productId) ?? item.productName ?? "",
+      quantity,
+      bagWeight,
+      totalWeight: quantity * bagWeight,
+      currentSalePrice: price,
+      saleRate: bagWeight ? price / bagWeight : 0,
+      subtotal: quantity * price,
+    };
+  });
+}
+
+function effectiveItems(doc) {
+  if (Array.isArray(doc.items) && doc.items.length > 0) return doc.items;
+  if (doc.productId && doc.quantity > 0) {
+    return [{
+      id: `itm-${doc._id}-1`,
+      productId: doc.productId,
+      productName: doc.productName,
+      quantity: doc.quantity,
+      bagWeight: doc.bagWeight,
+      totalWeight: doc.totalWeight,
+      currentSalePrice: doc.currentSalePrice,
+      saleRate: doc.saleRate,
+      subtotal: doc.subtotal,
+    }];
+  }
+  return [];
+}
+
+function computedFromItems(items, body) {
+  const subtotal = items.reduce((sum, item) => sum + item.subtotal, 0);
+  const discount = Number(body.discount) || 0;
+  const shipping = Number(body.transportCharges) || 0;
+  const other = Number(body.otherCharges) || 0;
+  const grandTotal = subtotal - discount + shipping + other;
+  const receivedAmount = Number(body.receivedAmount) || 0;
+  const first = items[0];
+  return {
+    items,
+    productId: first.productId,
+    productName: first.productName,
+    quantity: first.quantity,
+    bagWeight: first.bagWeight,
+    totalWeight: first.totalWeight,
+    currentSalePrice: first.currentSalePrice,
+    saleRate: first.saleRate,
+    subtotal,
+    grandTotal,
+    remainingBalance: grandTotal - receivedAmount,
+  };
+}
+
 function assertStock(doc) {
   return {
     async check() {
-      if (!doc.productId || !doc.warehouseId || doc.quantity <= 0) return;
-      const item = await InventoryItem.findOne({ productId: doc.productId, warehouseId: doc.warehouseId });
-      const available = item ? item.currentStock - item.reservedStock : 0;
-      if (available < doc.quantity) {
-        const error = new Error(`Insufficient stock available. Requested: ${doc.quantity}, Available: ${available}`);
-        error.status = 400;
-        throw error;
+      for (const item of effectiveItems(doc)) {
+        if (!item.productId || !doc.warehouseId || item.quantity <= 0) continue;
+        const inventoryItem = await InventoryItem.findOne({ productId: item.productId, warehouseId: doc.warehouseId });
+        const available = inventoryItem ? inventoryItem.currentStock - inventoryItem.reservedStock : 0;
+        if (available < item.quantity) {
+          const error = new Error(`Insufficient stock available for ${item.productName || item.productId}. Requested: ${item.quantity}, Available: ${available}`);
+          error.status = 400;
+          throw error;
+        }
       }
     },
   };
 }
 
 async function applySale(doc) {
-  if (doc.productId && doc.warehouseId && doc.quantity > 0) {
-    await assertStock(doc).check();
-  }
+  await assertStock(doc).check();
   if (doc.customerId && doc.grandTotal > 0) {
     await Customer.updateOne(
       { _id: doc.customerId },
@@ -74,17 +146,19 @@ async function applySale(doc) {
       },
     );
   }
-  if (doc.productId && doc.warehouseId && doc.quantity > 0) {
-    await decrementInventory({
-      productId: doc.productId,
-      warehouseId: doc.warehouseId,
-      quantity: doc.quantity,
-    });
-    await syncProductStock(doc.productId);
-    await syncWarehouseStats(doc.warehouseId);
-  }
-  if (doc.productId && doc.currentSalePrice > 0) {
-    await Product.updateOne({ _id: doc.productId }, { $set: { suggestedSalePrice: doc.currentSalePrice } });
+  for (const item of effectiveItems(doc)) {
+    if (item.productId && doc.warehouseId && item.quantity > 0) {
+      await decrementInventory({
+        productId: item.productId,
+        warehouseId: doc.warehouseId,
+        quantity: item.quantity,
+      });
+      await syncProductStock(item.productId);
+      await syncWarehouseStats(doc.warehouseId);
+    }
+    if (item.productId && item.currentSalePrice > 0) {
+      await Product.updateOne({ _id: item.productId }, { $set: { suggestedSalePrice: item.currentSalePrice } });
+    }
   }
 }
 
@@ -101,16 +175,18 @@ async function reverseSale(doc) {
       },
     );
   }
-  if (doc.productId && doc.warehouseId && doc.quantity > 0) {
-    await incrementInventory({
-      productId: doc.productId,
-      warehouseId: doc.warehouseId,
-      quantity: doc.quantity,
-      avgCostRate: 0,
-      date: doc.saleDate,
-    });
-    await syncProductStock(doc.productId);
-    await syncWarehouseStats(doc.warehouseId);
+  for (const item of effectiveItems(doc)) {
+    if (item.productId && doc.warehouseId && item.quantity > 0) {
+      await incrementInventory({
+        productId: item.productId,
+        warehouseId: doc.warehouseId,
+        quantity: item.quantity,
+        avgCostRate: 0,
+        date: doc.saleDate,
+      });
+      await syncProductStock(item.productId);
+      await syncWarehouseStats(doc.warehouseId);
+    }
   }
 }
 
@@ -136,13 +212,23 @@ export async function getSaleById(req, res) {
 export async function createSale(req, res) {
   const { id } = req.body;
   const body = sanitizeBody(req.body);
+  const items = await normalizeItems(body);
+  const computed = items ? computedFromItems(items, body) : {};
+  await assertStock({
+    warehouseId: body.warehouseId,
+    items: items ?? [],
+    productId: body.productId,
+    quantity: Number(body.quantity) || 0,
+    ...computed,
+  }).check();
   const names = await resolveNames(body);
   const initialReceived = Number(body.receivedAmount) || 0;
+  body.status = paymentBasedStatus({ ...body, ...computed, receivedAmount: initialReceived });
   const payments = initialReceived > 0 ? [{
     id: `pay-${id}-initial`, saleId: id, date: body.saleDate, amount: initialReceived,
     method: body.paymentMethod ?? "cash", reference: `PAY-${String(body.saleNumber).slice(-4)}-INITIAL`, notes: "Initial payment received.",
   }] : [];
-  const sale = await Sale.create({ _id: id, ...body, ...names, payments });
+  const sale = await Sale.create({ _id: id, ...body, ...computed, ...names, payments });
   await applySale(sale);
   res.status(201).json(sale);
 }
@@ -159,11 +245,21 @@ export async function updateSale(req, res) {
     return res.status(404).json({ message: "Sale not found." });
   }
   const body = sanitizeBody(req.body);
+  const items = await normalizeItems(body);
+  const computed = items ? computedFromItems(items, body) : {};
+  await assertStock({
+    warehouseId: body.warehouseId,
+    items: items ?? [],
+    productId: body.productId,
+    quantity: Number(body.quantity) || 0,
+    ...computed,
+  }).check();
   const names = await resolveNames(body);
+  body.status = paymentBasedStatus({ ...body, ...computed });
   await reverseSale(old);
   const sale = await Sale.findByIdAndUpdate(
     req.params.id,
-    { ...body, ...names, updatedAt: today() },
+    { ...body, ...computed, ...names, updatedAt: today() },
     { new: true, runValidators: true },
   );
   await applySale(sale);
@@ -219,6 +315,7 @@ export async function addSalePayment(req, res) {
         receivedAmount,
         remainingBalance: sale.grandTotal - receivedAmount,
         paymentStatus,
+        status: receivedAmount >= sale.grandTotal ? "paid" : "partial",
         paymentMethod: method,
         payments,
         notes: sale.notes,

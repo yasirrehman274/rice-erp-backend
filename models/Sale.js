@@ -1,6 +1,6 @@
 import mongoose from "mongoose";
 
-const STATUSES = ["pending", "dispatched", "partial", "cancelled"];
+const STATUSES = ["pending", "dispatched", "partial", "paid", "cancelled"];
 const PAYMENT_STATUSES = ["unpaid", "partial", "paid"];
 const PAYMENT_METHODS = ["cash", "bank", "cheque", "online"];
 
@@ -13,6 +13,21 @@ const paymentSchema = new mongoose.Schema(
     method: { type: String, enum: PAYMENT_METHODS, required: true },
     reference: { type: String, required: true },
     notes: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
+const itemSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true },
+    productId: { type: String, required: true },
+    productName: { type: String, default: "" },
+    quantity: { type: Number, required: true, min: 1 },
+    bagWeight: { type: Number, default: 0, min: 0 },
+    totalWeight: { type: Number, default: 0, min: 0 },
+    currentSalePrice: { type: Number, default: 0, min: 0 },
+    saleRate: { type: Number, default: 0, min: 0 },
+    subtotal: { type: Number, default: 0, min: 0 },
   },
   { _id: false },
 );
@@ -50,6 +65,7 @@ const saleSchema = new mongoose.Schema(
     grandTotal: { type: Number, default: 0, min: 0 },
     receivedAmount: { type: Number, default: 0, min: 0 },
     payments: { type: [paymentSchema], default: [] },
+    items: { type: [itemSchema], default: [] },
     remainingBalance: { type: Number, default: 0, min: 0 },
     paymentMethod: {
       type: String,

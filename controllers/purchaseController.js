@@ -11,8 +11,40 @@ import {
 } from "./stockHelpers.js";
 
 function sanitizeBody(body = {}) {
-  const { id, _id, supplierName, warehouseName, productName, ...rest } = body;
+  const { id, _id, supplierName, warehouseName, productName, payments, ...rest } = body;
   return rest;
+}
+
+function legacyPayments(purchase) {
+  if (Array.isArray(purchase.payments) && purchase.payments.length > 0) return purchase.payments;
+  if (purchase.paidAmount <= 0) return [];
+  const payments = [];
+  let remaining = purchase.paidAmount;
+  if (remaining >= purchase.grandTotal * 0.5) {
+    const firstAmount = Math.round(purchase.grandTotal * 0.5);
+    payments.push({
+      id: `pay-${purchase._id}-01`,
+      purchaseId: purchase._id,
+      date: purchase.purchaseDate,
+      amount: firstAmount,
+      method: purchase.paymentMethod,
+      reference: `PAY-${purchase.purchaseNumber.slice(-4)}-01`,
+      notes: "Initial advance payment.",
+    });
+    remaining -= firstAmount;
+  }
+  if (remaining > 0) {
+    payments.push({
+      id: `pay-${purchase._id}-02`,
+      purchaseId: purchase._id,
+      date: purchase.updatedAt,
+      amount: remaining,
+      method: purchase.paymentMethod,
+      reference: `PAY-${purchase.purchaseNumber.slice(-4)}-02`,
+      notes: "Balance payment.",
+    });
+  }
+  return payments;
 }
 
 async function resolveNames(body) {
@@ -147,34 +179,7 @@ export async function getPurchasePayments(req, res) {
   if (!purchase) {
     return res.status(404).json({ message: "Purchase not found." });
   }
-  const payments = [];
-  if (purchase.paidAmount === 0) return res.status(200).json(payments);
-  let remaining = purchase.paidAmount;
-  if (remaining >= purchase.grandTotal * 0.5) {
-    const firstAmount = Math.round(purchase.grandTotal * 0.5);
-    payments.push({
-      id: `pay-${purchase._id}-01`,
-      purchaseId: purchase._id,
-      date: purchase.purchaseDate,
-      amount: firstAmount,
-      method: purchase.paymentMethod,
-      reference: `PAY-${purchase.purchaseNumber.slice(-4)}-01`,
-      notes: "Initial advance payment.",
-    });
-    remaining -= firstAmount;
-  }
-  if (remaining > 0) {
-    payments.push({
-      id: `pay-${purchase._id}-02`,
-      purchaseId: purchase._id,
-      date: purchase.updatedAt,
-      amount: remaining,
-      method: purchase.paymentMethod,
-      reference: `PAY-${purchase.purchaseNumber.slice(-4)}-02`,
-      notes: "Balance payment.",
-    });
-  }
-  res.status(200).json(payments);
+  res.status(200).json(legacyPayments(purchase));
 }
 
 export async function addPurchasePayment(req, res) {
@@ -182,7 +187,7 @@ export async function addPurchasePayment(req, res) {
   if (!purchase) {
     return res.status(404).json({ message: "Purchase not found." });
   }
-  const { amount, method = "cash", notes = "" } = req.body ?? {};
+  const { amount, method = "cash", notes = "", createdBy = "" } = req.body ?? {};
   const numAmount = Number(amount);
   if (!Number.isFinite(numAmount) || numAmount <= 0) {
     return res.status(400).json({ message: "Payment amount must be greater than zero." });
@@ -192,6 +197,23 @@ export async function addPurchasePayment(req, res) {
   }
   const paidAmount = purchase.paidAmount + numAmount;
   const paymentStatus = paidAmount >= purchase.grandTotal ? "paid" : "partial";
+  const existing = legacyPayments(purchase);
+  const now = today();
+  const payments = [
+    ...existing,
+    {
+      id: `pay-${purchase._id}-${Date.now()}`,
+      purchaseId: purchase._id,
+      date: now,
+      amount: numAmount,
+      method,
+      reference: `PAY-${purchase.purchaseNumber.slice(-4)}-${existing.length + 1}`,
+      notes,
+      createdBy,
+      createdAt: now,
+      updatedAt: now,
+    },
+  ];
   const updated = await Purchase.findByIdAndUpdate(
     purchase._id,
     {
@@ -200,8 +222,9 @@ export async function addPurchasePayment(req, res) {
         remainingBalance: purchase.grandTotal - paidAmount,
         paymentStatus,
         paymentMethod: method,
+        payments,
         notes: purchase.notes,
-        updatedAt: today(),
+        updatedAt: now,
       },
     },
     { new: true },
@@ -210,6 +233,101 @@ export async function addPurchasePayment(req, res) {
     await Supplier.updateOne(
       { _id: purchase.supplierId },
       { $inc: { currentBalance: -numAmount, totalPaid: numAmount } },
+    );
+  }
+  res.status(200).json(updated);
+}
+
+export async function updatePurchasePayment(req, res) {
+  const { id, paymentId } = req.params;
+  const purchase = await Purchase.findById(id);
+  if (!purchase) {
+    return res.status(404).json({ message: "Purchase not found." });
+  }
+  const payments = Array.isArray(purchase.payments) ? [...purchase.payments] : [];
+  const index = payments.findIndex((p) => p.id === paymentId);
+  if (index === -1) {
+    return res.status(404).json({ message: "Payment not found." });
+  }
+  const old = payments[index];
+  const { amount, date, method = old.method, reference = old.reference, notes = old.notes, createdBy = old.createdBy ?? "" } =
+    req.body ?? {};
+  const numAmount = Number(amount);
+  if (!Number.isFinite(numAmount) || numAmount <= 0) {
+    return res.status(400).json({ message: "Payment amount must be greater than zero." });
+  }
+  const paidAmount = purchase.paidAmount - old.amount + numAmount;
+  if (paidAmount > purchase.grandTotal) {
+    return res.status(400).json({ message: "Payment amount exceeds the outstanding balance." });
+  }
+  const paymentStatus = paidAmount >= purchase.grandTotal ? "paid" : "partial";
+  const now = today();
+  payments[index] = {
+    ...old,
+    date: date || old.date,
+    amount: numAmount,
+    method,
+    reference: reference || old.reference,
+    notes,
+    createdBy,
+    updatedAt: now,
+  };
+  const diff = numAmount - old.amount;
+  const updated = await Purchase.findByIdAndUpdate(
+    purchase._id,
+    {
+      $set: {
+        paidAmount,
+        remainingBalance: purchase.grandTotal - paidAmount,
+        paymentStatus,
+        paymentMethod: method,
+        payments,
+        notes: purchase.notes,
+        updatedAt: now,
+      },
+    },
+    { new: true },
+  );
+  if (purchase.supplierId && diff !== 0) {
+    await Supplier.updateOne(
+      { _id: purchase.supplierId },
+      { $inc: { currentBalance: -diff, totalPaid: diff } },
+    );
+  }
+  res.status(200).json(updated);
+}
+
+export async function deletePurchasePayment(req, res) {
+  const { id, paymentId } = req.params;
+  const purchase = await Purchase.findById(id);
+  if (!purchase) {
+    return res.status(404).json({ message: "Purchase not found." });
+  }
+  const payments = Array.isArray(purchase.payments) ? [...purchase.payments] : [];
+  const index = payments.findIndex((p) => p.id === paymentId);
+  if (index === -1) {
+    return res.status(404).json({ message: "Payment not found." });
+  }
+  const removed = payments[index];
+  const paidAmount = Math.max(0, purchase.paidAmount - removed.amount);
+  const paymentStatus = paidAmount >= purchase.grandTotal ? "paid" : paidAmount > 0 ? "partial" : "unpaid";
+  const updated = await Purchase.findByIdAndUpdate(
+    purchase._id,
+    {
+      $set: {
+        paidAmount,
+        remainingBalance: purchase.grandTotal - paidAmount,
+        paymentStatus,
+        payments: payments.filter((p) => p.id !== paymentId),
+        updatedAt: today(),
+      },
+    },
+    { new: true },
+  );
+  if (purchase.supplierId) {
+    await Supplier.updateOne(
+      { _id: purchase.supplierId },
+      { $inc: { currentBalance: removed.amount, totalPaid: -removed.amount } },
     );
   }
   res.status(200).json(updated);

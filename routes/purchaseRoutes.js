@@ -8,6 +8,8 @@ import {
   deletePurchase,
   getPurchasePayments,
   addPurchasePayment,
+  updatePurchasePayment,
+  deletePurchasePayment,
   receivePurchase,
   getPurchaseHistory,
 } from "../controllers/purchaseController.js";
@@ -18,6 +20,8 @@ router.get("/", getAllPurchases);
 router.get("/history", getPurchaseHistory);
 router.get("/:id/payments", getPurchasePayments);
 router.post("/:id/payments", addPurchasePayment);
+router.put("/:id/payments/:paymentId", updatePurchasePayment);
+router.delete("/:id/payments/:paymentId", deletePurchasePayment);
 router.post("/:id/receive", receivePurchase);
 router.get("/:id", getPurchaseById);
 router.post("/import", importPurchase);
