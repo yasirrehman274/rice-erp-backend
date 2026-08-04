@@ -6,7 +6,7 @@ import InventoryItem from "../models/InventoryItem.js";
 import {
   today,
   incrementInventory,
-  decrementInventory,
+  consumeInventory,
   syncProductStock,
   syncWarehouseStats,
 } from "./stockHelpers.js";
@@ -118,12 +118,18 @@ function computedFromItems(items, body) {
 function assertStock(doc) {
   return {
     async check() {
+      if (!doc.warehouseId) return;
+      const quantities = {};
       for (const item of effectiveItems(doc)) {
-        if (!item.productId || !doc.warehouseId || item.quantity <= 0) continue;
-        const inventoryItem = await InventoryItem.findOne({ productId: item.productId, warehouseId: doc.warehouseId });
+        if (!item.productId || item.quantity <= 0) continue;
+        quantities[item.productId] = (quantities[item.productId] || 0) + item.quantity;
+      }
+      for (const productId of Object.keys(quantities)) {
+        const inventoryItem = await InventoryItem.findOne({ productId, warehouseId: doc.warehouseId });
         const available = inventoryItem ? inventoryItem.currentStock - inventoryItem.reservedStock : 0;
-        if (available < item.quantity) {
-          const error = new Error(`Insufficient stock available for ${item.productName || item.productId}. Requested: ${item.quantity}, Available: ${available}`);
+        if (available < quantities[productId]) {
+          const product = await Product.findById(productId).lean();
+          const error = new Error(`Insufficient stock available for ${product?.productName || productId}. Requested: ${quantities[productId]}, Available: ${available}`);
           error.status = 400;
           throw error;
         }
@@ -148,10 +154,11 @@ async function applySale(doc) {
   }
   for (const item of effectiveItems(doc)) {
     if (item.productId && doc.warehouseId && item.quantity > 0) {
-      await decrementInventory({
+      await consumeInventory({
         productId: item.productId,
         warehouseId: doc.warehouseId,
         quantity: item.quantity,
+        productName: item.productName,
       });
       await syncProductStock(item.productId);
       await syncWarehouseStats(doc.warehouseId);

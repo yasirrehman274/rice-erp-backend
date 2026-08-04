@@ -69,6 +69,26 @@ export async function decrementInventory({ productId, warehouseId, quantity }) {
   );
 }
 
+export async function consumeInventory({ productId, warehouseId, quantity, productName }) {
+  const updated = await InventoryItem.findOneAndUpdate(
+    {
+      productId,
+      warehouseId,
+      $expr: { $gte: [{ $subtract: ["$currentStock", "$reservedStock"] }, quantity] },
+    },
+    { $inc: { currentStock: -quantity }, $set: { updatedAt: today() } },
+    { new: true },
+  );
+  if (!updated) {
+    const item = await InventoryItem.findOne({ productId, warehouseId }).lean();
+    const available = item ? item.currentStock - item.reservedStock : 0;
+    const error = new Error(`Insufficient stock available for ${productName || productId}. Requested: ${quantity}, Available: ${available}`);
+    error.status = 400;
+    throw error;
+  }
+  return updated;
+}
+
 export async function syncProductStock(productId) {
   const items = await InventoryItem.find({ productId }).lean();
   const currentStock = items.reduce((sum, i) => sum + i.currentStock, 0);
