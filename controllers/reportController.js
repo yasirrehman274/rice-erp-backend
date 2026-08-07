@@ -6,6 +6,16 @@ import Customer from "../models/Customer.js";
 import Warehouse from "../models/Warehouse.js";
 import InventoryItem from "../models/InventoryItem.js";
 import Expense from "../models/Expense.js";
+import Production from "../models/Production.js";
+import {
+  resolveDateRange,
+  inRange,
+  calcCOGS,
+  calcInventoryValue,
+  calcInventoryReport,
+  calcProfitLoss,
+  calcPurchaseSummary,
+} from "../services/reportServices.js";
 
 export async function getDashboardData(req, res) {
   const [purchases, sales, products, suppliers, customers, warehouses, inventory, expenses] = await Promise.all([
@@ -19,22 +29,44 @@ export async function getDashboardData(req, res) {
     Expense.find({}).lean(),
   ]);
 
-  const totalPurchases = purchases.reduce((sum, p) => sum + p.grandTotal, 0);
-  const totalSales = sales.reduce((sum, s) => sum + s.grandTotal, 0);
-  const totalExpenses = expenses
-    .filter((e) => e.status !== "cancelled")
-    .reduce((sum, e) => sum + e.amount, 0);
-  const totalInventory = inventory.reduce((sum, item) => sum + item.currentStock, 0);
-  const lowStockItems = inventory.filter((item) => item.currentStock <= item.minimumStock).length;
+  const range = resolveDateRange(req.query);
+  const purchaseSummary = calcPurchaseSummary(purchases, range);
+  const profitLoss = calcProfitLoss({ sales, expenses, inventory, range });
+  const inventoryValue = calcInventoryValue({ inventory, products });
 
   res.status(200).json({
-    totalPurchases,
-    totalSales,
-    totalExpenses,
-    profit: totalSales - totalPurchases,
-    netProfit: totalSales - totalPurchases - totalExpenses,
-    totalInventory,
-    lowStockItems,
+    period: range,
+    purchaseSummary: {
+      orderCount: purchaseSummary.orderCount,
+      total: purchaseSummary.total,
+      discount: purchaseSummary.discount,
+      transportCharges: purchaseSummary.transportCharges,
+      otherCharges: purchaseSummary.otherCharges,
+      netTotal: purchaseSummary.netTotal,
+      avgPerOrder: purchaseSummary.orderCount > 0 ? purchaseSummary.total / purchaseSummary.orderCount : 0,
+    },
+    profitLoss: {
+      grossSales: profitLoss.grossSales,
+      salesDiscount: profitLoss.salesDiscount,
+      netSales: profitLoss.netSales,
+      cogs: profitLoss.cogs.total,
+      cogsDetail: profitLoss.cogs.items,
+      grossProfit: profitLoss.grossProfit,
+      operatingExpenses: profitLoss.operatingExpenses,
+      expenseCount: profitLoss.expenseCount,
+      netProfit: profitLoss.netProfit,
+    },
+    inventoryValue: {
+      totalBags: inventoryValue.totalBags,
+      totalValue: inventoryValue.totalValue,
+      lowStockItems: inventoryValue.lowStockCount,
+      outOfStockItems: inventoryValue.outOfStockCount,
+    },
+    totalPurchases: purchaseSummary.total,
+    totalSales: profitLoss.netSales,
+    totalExpenses: profitLoss.operatingExpenses,
+    totalInventory: inventoryValue.totalBags,
+    lowStockItems: inventoryValue.lowStockCount,
     activeSuppliers: suppliers.filter((s) => s.status === "active").length,
     activeCustomers: customers.filter((c) => c.status === "active").length,
     activeWarehouses: warehouses.filter((w) => w.status === "active").length,
@@ -43,47 +75,74 @@ export async function getDashboardData(req, res) {
 }
 
 export async function getProfitLossData(req, res) {
-  const [purchases, sales, expenses] = await Promise.all([
-    Purchase.find({}).lean(),
+  const [sales, expenses, inventory] = await Promise.all([
     Sale.find({}).lean(),
     Expense.find({}).lean(),
+    InventoryItem.find({}).lean(),
   ]);
 
-  const totalSales = sales.reduce((sum, s) => sum + s.grandTotal, 0);
-  const totalPurchases = purchases.reduce((sum, p) => sum + p.grandTotal, 0);
-  const totalSalesDiscount = sales.reduce((sum, s) => sum + s.discount, 0);
-  const totalPurchaseDiscount = purchases.reduce((sum, p) => sum + p.discount, 0);
-  const totalTransportOut = sales.reduce((sum, s) => sum + s.transportCharges, 0);
-  const totalTransportIn = purchases.reduce((sum, p) => sum + p.transportCharges, 0);
-  const totalOtherOut = sales.reduce((sum, s) => sum + s.otherCharges, 0);
-  const totalOtherIn = purchases.reduce((sum, p) => sum + p.otherCharges, 0);
-  const netSales = totalSales - totalSalesDiscount;
-  const netPurchases = totalPurchases - totalPurchaseDiscount;
-  const grossProfit = netSales - netPurchases;
-  const totalExpenses = totalTransportOut + totalOtherOut;
-  const expenseTotal = expenses
-    .filter((e) => e.status !== "cancelled")
-    .reduce((sum, e) => sum + e.amount, 0);
-  const expenseCount = expenses.filter((e) => e.status !== "cancelled").length;
-  const totalOperatingExpenses = totalExpenses + expenseTotal;
-  const netProfit = grossProfit - totalExpenses - expenseTotal;
+  const range = resolveDateRange(req.query);
+  const pl = calcProfitLoss({ sales, expenses, inventory, range });
 
   res.status(200).json({
-    totalSales,
-    totalPurchases,
-    totalSalesDiscount,
-    totalPurchaseDiscount,
-    totalTransportIn,
-    totalTransportOut,
-    totalOtherIn,
-    totalOtherOut,
-    netSales,
-    netPurchases,
-    grossProfit,
-    totalExpenses,
-    expenseTotal,
-    expenseCount,
-    totalOperatingExpenses,
-    netProfit,
+    period: range,
+    grossSales: pl.grossSales,
+    salesDiscount: pl.salesDiscount,
+    transportCharges: pl.transportCharges,
+    otherCharges: pl.otherCharges,
+    netSales: pl.netSales,
+    cogs: pl.cogs.total,
+    cogsDetail: pl.cogs.items,
+    grossProfit: pl.grossProfit,
+    operatingExpenses: pl.operatingExpenses,
+    expenseCount: pl.expenseCount,
+    expenseCategories: pl.expenseCategories,
+    netProfit: pl.netProfit,
+  });
+}
+
+export async function getInventoryReport(req, res) {
+  const [inventory, products, purchases, sales, productions] = await Promise.all([
+    InventoryItem.find({}).lean(),
+    Product.find({}).lean(),
+    Purchase.find({}).lean(),
+    Sale.find({}).lean(),
+    Production.find({}).lean(),
+  ]);
+
+  const range = resolveDateRange(req.query);
+  const report = calcInventoryReport({ inventory, purchases, sales, productions, range });
+  const valuation = calcInventoryValue({ inventory, products });
+
+  res.status(200).json({
+    period: range,
+    report,
+    valuation: {
+      totalBags: valuation.totalBags,
+      totalValue: valuation.totalValue,
+      byProduct: valuation.byProduct,
+    },
+  });
+}
+
+export async function getCogsReport(req, res) {
+  const [sales, inventory, products] = await Promise.all([
+    Sale.find({}).lean(),
+    InventoryItem.find({}).lean(),
+    Product.find({}).lean(),
+  ]);
+
+  const range = resolveDateRange(req.query);
+  const activeSales = sales.filter((s) => s.status !== "cancelled" && inRange(s.saleDate, range));
+  const cogs = calcCOGS(activeSales, inventory);
+  const valuation = calcInventoryValue({ inventory, products });
+
+  res.status(200).json({
+    period: range,
+    cogs,
+    inventoryValue: {
+      totalBags: valuation.totalBags,
+      totalValue: valuation.totalValue,
+    },
   });
 }
