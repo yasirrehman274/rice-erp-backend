@@ -20,6 +20,23 @@ const paymentSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const itemSchema = new mongoose.Schema(
+  {
+    id: { type: String, required: true },
+    productId: { type: String, required: true },
+    productName: { type: String, default: "" },
+    quantity: { type: Number, required: true, min: 1 },
+    bagWeight: { type: Number, default: 0, min: 0 },
+    totalWeight: { type: Number, default: 0, min: 0 },
+    currentPurchasePrice: { type: Number, default: 0, min: 0 },
+    purchaseRate: { type: Number, default: 0, min: 0 },
+    subtotal: { type: Number, default: 0, min: 0 },
+    batchNumber: { type: String, default: "" },
+    riceVariety: { type: String, default: "" },
+  },
+  { _id: false },
+);
+
 const purchaseSchema = new mongoose.Schema(
   {
     _id: { type: String, required: [true, "Purchase id is required."] },
@@ -53,6 +70,7 @@ const purchaseSchema = new mongoose.Schema(
     grandTotal: { type: Number, default: 0, min: 0 },
     paidAmount: { type: Number, default: 0, min: 0 },
     payments: { type: [paymentSchema], default: [] },
+    items: { type: [itemSchema], default: [] },
     remainingBalance: { type: Number, default: 0, min: 0 },
     paymentMethod: {
       type: String,

@@ -75,6 +75,19 @@ export function saleItems(sale) {
   ];
 }
 
+export function purchaseItems(purchase) {
+  if (Array.isArray(purchase.items) && purchase.items.length > 0) return purchase.items;
+  return [
+    {
+      productId: purchase.productId,
+      productName: purchase.productName,
+      quantity: Number(purchase.quantity) || 0,
+      bagWeight: Number(purchase.bagWeight) || 0,
+      subtotal: Number(purchase.subtotal) || 0,
+    },
+  ];
+}
+
 function productBagWeight(products, productId) {
   const product = products.find((p) => String(p._id) === String(productId));
   const match = String(product?.bagWeight ?? "").match(/\d+(\.\d+)?/);
@@ -161,10 +174,12 @@ export function calcInventoryReport({ inventory, purchases, sales, productions, 
 
   for (const purchase of purchases) {
     if (!isActivePurchase(purchase) || !inRange(purchase.purchaseDate, range)) continue;
-    track(purchase.productId);
-    const entry = movements.get(String(purchase.productId));
-    entry.purchases += Number(purchase.quantity) || 0;
-    names.set(String(purchase.productId), purchase.productName || names.get(String(purchase.productId)) || "");
+    for (const item of purchaseItems(purchase)) {
+      track(item.productId);
+      const entry = movements.get(String(item.productId));
+      entry.purchases += Number(item.quantity) || 0;
+      names.set(String(item.productId), item.productName || names.get(String(item.productId)) || "");
+    }
   }
 
   for (const production of productions) {

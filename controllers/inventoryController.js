@@ -189,8 +189,11 @@ export async function getStockLedger(req, res) {
   }
   const { productId, warehouseId } = item;
   const [purchases, sales, adjustments, transfers] = await Promise.all([
-    Purchase.find({ productId, warehouseId, quantity: { $gt: 0 } })
-      .select("_id purchaseNumber purchaseDate quantity")
+    Purchase.find({
+      warehouseId,
+      $or: [{ productId, quantity: { $gt: 0 } }, { "items.productId": productId }],
+    })
+      .select("_id purchaseNumber purchaseDate productId quantity items")
       .lean(),
     Sale.find({ productId, warehouseId, quantity: { $gt: 0 } })
       .select("_id saleNumber saleDate quantity")
@@ -203,16 +206,20 @@ export async function getStockLedger(req, res) {
 
   const rows = [];
   for (const p of purchases) {
-    rows.push({
-      id: `led-p-${p._id}`,
-      date: p.purchaseDate,
-      type: "purchase",
-      description: "Purchase receipt",
-      reference: p.purchaseNumber,
-      stockIn: p.quantity,
-      stockOut: 0,
-      sort: `${p.purchaseDate}|p|${p._id}`,
-    });
+    const lines = Array.isArray(p.items) && p.items.length > 0 ? p.items : [{ productId: p.productId, quantity: p.quantity }];
+    for (const line of lines) {
+      if (String(line.productId) !== String(productId) || !(Number(line.quantity) > 0)) continue;
+      rows.push({
+        id: `led-p-${p._id}-${line.productId}`,
+        date: p.purchaseDate,
+        type: "purchase",
+        description: "Purchase receipt",
+        reference: p.purchaseNumber,
+        stockIn: line.quantity,
+        stockOut: 0,
+        sort: `${p.purchaseDate}|p|${p._id}|${line.productId}`,
+      });
+    }
   }
   for (const s of sales) {
     rows.push({

@@ -60,6 +60,87 @@ async function resolveNames(body) {
   };
 }
 
+async function normalizeItems(body) {
+  const raw = Array.isArray(body.items) && body.items.length > 0 ? body.items : null;
+  if (!raw) return null;
+  const ids = [...new Set(raw.map((item) => item.productId).filter(Boolean))];
+  const products = await Product.find({ _id: { $in: ids } }).lean();
+  const names = new Map(products.map((product) => [product._id, product.productName]));
+  return raw.map((item) => {
+    const quantity = Number(item.quantity) || 0;
+    const bagWeight = Number(item.bagWeight) || 0;
+    const price = Number(item.currentPurchasePrice) || 0;
+    const totalWeight = quantity * bagWeight;
+    return {
+      id: item.id || `itm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      productId: item.productId ?? "",
+      productName: names.get(item.productId) ?? item.productName ?? "",
+      quantity,
+      bagWeight,
+      totalWeight,
+      currentPurchasePrice: price,
+      purchaseRate: totalWeight > 0 ? (price * quantity) / totalWeight : 0,
+      subtotal: quantity * price,
+      batchNumber: item.batchNumber ?? "",
+      riceVariety: item.riceVariety ?? "",
+    };
+  });
+}
+
+function effectiveItems(doc) {
+  if (Array.isArray(doc.items) && doc.items.length > 0) return doc.items;
+  if (doc.productId && doc.quantity > 0) {
+    return [{
+      id: `itm-${doc._id}-1`,
+      productId: doc.productId,
+      productName: doc.productName,
+      quantity: doc.quantity,
+      bagWeight: doc.bagWeight,
+      totalWeight: doc.totalWeight,
+      currentPurchasePrice: doc.currentPurchasePrice,
+      purchaseRate: doc.purchaseRate,
+      subtotal: doc.subtotal,
+      batchNumber: doc.batchNumber ?? "",
+      riceVariety: doc.riceVariety ?? "",
+    }];
+  }
+  return [];
+}
+
+function computedFromItems(items, body) {
+  const subtotal = items.reduce((sum, item) => sum + item.subtotal, 0);
+  const discount = Number(body.discount) || 0;
+  const shipping = Number(body.transportCharges) || 0;
+  const other = Number(body.otherCharges) || 0;
+  const grandTotal = subtotal - discount + shipping + other;
+  const paidAmount = Number(body.paidAmount) || 0;
+  const first = items[0];
+  return {
+    items,
+    productId: first.productId,
+    productName: first.productName,
+    batchNumber: first.batchNumber,
+    riceVariety: first.riceVariety,
+    quantity: first.quantity,
+    bagWeight: first.bagWeight,
+    totalWeight: first.totalWeight,
+    currentPurchasePrice: first.currentPurchasePrice,
+    purchaseRate: first.purchaseRate,
+    subtotal,
+    grandTotal,
+    remainingBalance: grandTotal - paidAmount,
+  };
+}
+
+function purchaseSummary(doc) {
+  const items = effectiveItems(doc);
+  const totalBags = items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+  const name = items.length > 1
+    ? `${items[0].productName} +${items.length - 1} more`
+    : (items[0]?.productName ?? doc.productName ?? "");
+  return { productName: name, quantity: totalBags };
+}
+
 async function applyPurchase(doc) {
   if (doc.supplierId && doc.grandTotal > 0) {
     await Supplier.updateOne(
@@ -73,19 +154,21 @@ async function applyPurchase(doc) {
       },
     );
   }
-  if (doc.productId && doc.warehouseId && doc.quantity > 0) {
-    await incrementInventory({
-      productId: doc.productId,
-      warehouseId: doc.warehouseId,
-      quantity: doc.quantity,
-      avgCostRate: doc.purchaseRate,
-      date: doc.purchaseDate,
-    });
-    await syncProductStock(doc.productId);
-    await syncWarehouseStats(doc.warehouseId);
-  }
-  if (doc.productId && doc.currentPurchasePrice > 0) {
-    await Product.updateOne({ _id: doc.productId }, { $set: { lastPurchasePrice: doc.currentPurchasePrice } });
+  for (const item of effectiveItems(doc)) {
+    if (item.productId && doc.warehouseId && item.quantity > 0) {
+      await incrementInventory({
+        productId: item.productId,
+        warehouseId: doc.warehouseId,
+        quantity: item.quantity,
+        avgCostRate: item.purchaseRate,
+        date: doc.purchaseDate,
+      });
+      await syncProductStock(item.productId);
+      await syncWarehouseStats(doc.warehouseId);
+    }
+    if (item.productId && item.currentPurchasePrice > 0) {
+      await Product.updateOne({ _id: item.productId }, { $set: { lastPurchasePrice: item.currentPurchasePrice } });
+    }
   }
 }
 
@@ -102,14 +185,16 @@ async function reversePurchase(doc) {
       },
     );
   }
-  if (doc.productId && doc.warehouseId && doc.quantity > 0) {
-    await decrementInventory({
-      productId: doc.productId,
-      warehouseId: doc.warehouseId,
-      quantity: doc.quantity,
-    });
-    await syncProductStock(doc.productId);
-    await syncWarehouseStats(doc.warehouseId);
+  for (const item of effectiveItems(doc)) {
+    if (item.productId && doc.warehouseId && item.quantity > 0) {
+      await decrementInventory({
+        productId: item.productId,
+        warehouseId: doc.warehouseId,
+        quantity: item.quantity,
+      });
+      await syncProductStock(item.productId);
+      await syncWarehouseStats(doc.warehouseId);
+    }
   }
 }
 
@@ -118,7 +203,12 @@ export async function getAllPurchases(req, res) {
   const query = {};
   if (search) {
     const regex = new RegExp(search, "i");
-    query.$or = [{ purchaseNumber: regex }, { supplierName: regex }, { productName: regex }];
+    query.$or = [
+      { purchaseNumber: regex },
+      { supplierName: regex },
+      { productName: regex },
+      { "items.productName": regex },
+    ];
   }
   const purchases = await Purchase.find(query).sort({ purchaseDate: -1, createdAt: -1 });
   res.status(200).json(purchases);
@@ -135,8 +225,10 @@ export async function getPurchaseById(req, res) {
 export async function createPurchase(req, res) {
   const { id } = req.body;
   const body = sanitizeBody(req.body);
+  const items = await normalizeItems(body);
+  const computed = items ? computedFromItems(items, body) : {};
   const names = await resolveNames(body);
-  const purchase = await Purchase.create({ _id: id, ...body, ...names });
+  const purchase = await Purchase.create({ _id: id, ...body, ...computed, ...names });
   await applyPurchase(purchase);
   res.status(201).json(purchase);
 }
@@ -153,10 +245,12 @@ export async function updatePurchase(req, res) {
     return res.status(404).json({ message: "Purchase not found." });
   }
   const body = sanitizeBody(req.body);
+  const items = await normalizeItems(body);
+  const computed = items ? computedFromItems(items, body) : {};
   const names = await resolveNames(body);
   const purchase = await Purchase.findByIdAndUpdate(
     req.params.id,
-    { ...body, ...names, updatedAt: today() },
+    { ...body, ...computed, ...names, updatedAt: today() },
     { new: true, runValidators: true },
   );
   await reversePurchase(old);
@@ -358,17 +452,20 @@ export async function receivePurchase(req, res) {
 export async function getPurchaseHistory(req, res) {
   const purchases = await Purchase.find({}).sort({ purchaseDate: -1, createdAt: -1 }).lean();
   res.status(200).json(
-    purchases.map((p) => ({
-      id: p._id,
-      purchaseId: p._id,
-      purchaseNumber: p.purchaseNumber,
-      date: p.purchaseDate,
-      supplierName: p.supplierName,
-      productName: p.productName,
-      quantity: p.quantity,
-      amount: p.grandTotal,
-      status: p.status,
-      paymentStatus: p.paymentStatus,
-    })),
+    purchases.map((p) => {
+      const summary = purchaseSummary(p);
+      return {
+        id: p._id,
+        purchaseId: p._id,
+        purchaseNumber: p.purchaseNumber,
+        date: p.purchaseDate,
+        supplierName: p.supplierName,
+        productName: summary.productName,
+        quantity: summary.quantity,
+        amount: p.grandTotal,
+        status: p.status,
+        paymentStatus: p.paymentStatus,
+      };
+    }),
   );
 }
