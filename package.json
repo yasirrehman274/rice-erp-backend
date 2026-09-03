@@ -7,7 +7,10 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "server": "nodemon server.js"
+    "dev": "nodemon server.js",
+    "start": "node server.js",
+    "build": "echo 'Build complete'",
+    "test": "node --check server.js && node --check app.js && node --check api/index.js && node --check config/db.js && echo 'Syntax OK'"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
