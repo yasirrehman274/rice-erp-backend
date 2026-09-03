@@ -21,6 +21,12 @@ const ensureDb = async (req, res, next) => {
 };
 
 export default async function handler(req, res) {
+  // OPTIONS preflight never needs the database. Let Express CORS respond
+  // immediately with proper headers instead of blocking on the DB connect.
+  if (req.method === "OPTIONS") {
+    return app(req, res);
+  }
+
   try {
     await new Promise((resolve, reject) => {
       ensureDb(req, res, (err) => (err ? reject(err) : resolve()));

@@ -19,7 +19,6 @@ if (process.env.FRONTEND_URL) {
   allowedOrigins.push(process.env.FRONTEND_URL);
 }
 
-app.use(express.json());
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -31,6 +30,8 @@ app.use(
     credentials: true,
   }),
 );
+
+app.use(express.json());
 
 app.get("/", (req, res) => {
   res.send("API Working");
