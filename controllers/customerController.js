@@ -15,11 +15,14 @@ function sanitizeCreateBody(body = {}) {
 }
 
 export async function getAllCustomers(req, res) {
-  const { search } = req.query;
+  const { search, customerType } = req.query;
   const query = {};
   if (search) {
     const regex = new RegExp(search, "i");
     query.$or = [{ name: regex }, { businessName: regex }, { phone: regex }, { city: regex }, { email: regex }];
+  }
+  if (customerType && ["market", "outsider"].includes(customerType)) {
+    query.customerType = customerType;
   }
   const customers = await Customer.find(query).sort({ createdAt: -1, name: 1 });
   res.status(200).json(customers);

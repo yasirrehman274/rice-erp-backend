@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 
 const STATUSES = ["active", "inactive"];
+const CUSTOMER_TYPES = ["market", "outsider"];
 
 function validatePakistaniPhone(value) {
   return /^03\d{9}$/.test(String(value).replaceAll("-", ""));
@@ -17,6 +18,14 @@ function validateCnic(value) {
 const customerSchema = new mongoose.Schema(
   {
     _id: { type: String, required: [true, "Customer id is required."] },
+    customerType: {
+      type: String,
+      enum: {
+        values: CUSTOMER_TYPES,
+        message: "Customer type must be 'market' or 'outsider'.",
+      },
+      default: "market",
+    },
     name: {
       type: String,
       required: [true, "Customer name is required."],

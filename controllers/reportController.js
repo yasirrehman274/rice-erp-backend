@@ -69,6 +69,8 @@ export async function getDashboardData(req, res) {
     lowStockItems: inventoryValue.lowStockCount,
     activeSuppliers: suppliers.filter((s) => s.status === "active").length,
     activeCustomers: customers.filter((c) => c.status === "active").length,
+    marketCustomers: customers.filter((c) => (c.customerType || "market") === "market").length,
+    outsiderCustomers: customers.filter((c) => c.customerType === "outsider").length,
     activeWarehouses: warehouses.filter((w) => w.status === "active").length,
     activeProducts: products.filter((p) => p.status === "active").length,
   });
