@@ -7,9 +7,9 @@
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "dev": "nodemon server.js",
-    "start": "node server.js",
-    "build": "echo 'Build complete'",
+    "dev": "node init && nodemon server.js",
+    "start": "node init && node server.js",
+    "build": "node init && echo 'Build complete'",
     "test": "node --check server.js && node --check app.js && node --check api/index.js && node --check config/db.js && echo 'Syntax OK'"
   },
   "dependencies": {

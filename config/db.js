@@ -9,7 +9,7 @@ export const connectDB = async () => {
   const finalUri = uri.includes("retryWrites")
     ? uri
     : `${uri}${uri.includes("?") ? "&" : "?"}retryWrites=false`;
-  dbPromise = mongoose.connect(finalUri, { serverSelectionTimeoutMS: 10000 });
+  dbPromise = mongoose.connect(finalUri, { serverSelectionTimeoutMS: 5000 });
 
   try {
     await dbPromise;
