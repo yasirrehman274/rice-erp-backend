@@ -8,6 +8,7 @@ import {
   decrementInventory,
   syncProductStock,
   syncWarehouseStats,
+  assertWarehouseCapacity,
 } from "./stockHelpers.js";
 
 function sanitizeBody(body = {}) {
@@ -120,6 +121,13 @@ function assertValidProduction(doc) {
 }
 
 async function applyProduction(doc) {
+  if (doc.outputBags > 0) {
+    await assertWarehouseCapacity({
+      warehouseId: doc.warehouseId,
+      incomingBags: doc.outputBags,
+      label: "Production output",
+    });
+  }
   const touchedProducts = new Set();
   const touchedWarehouses = new Set();
   const applied = [];

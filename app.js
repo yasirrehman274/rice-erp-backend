@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import warehouseRoutes from "./routes/warehouseRoutes.js";
+import brokerRoutes from "./routes/brokerRoutes.js";
 import supplierRoutes from "./routes/supplierRoutes.js";
 import productRoutes from "./routes/productRoutes.js";
 import customerRoutes from "./routes/customerRoutes.js";
@@ -38,6 +39,7 @@ app.get("/", (req, res) => {
 });
 
 app.use("/api/warehouses", warehouseRoutes);
+app.use("/api/brokers", brokerRoutes);
 app.use("/api/suppliers", supplierRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/customers", customerRoutes);

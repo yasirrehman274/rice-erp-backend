@@ -124,15 +124,18 @@ export function calcCOGS(sales, inventory) {
       const bags = Number(item.quantity) || 0;
       const bagWeight = Number(item.bagWeight) || 0;
       if (bags <= 0) continue;
-      const costPerBag = round2(costPerKG * bagWeight);
+      const fallbackCostPerBag = round2(costPerKG * bagWeight);
+      const costPerBag = Number(item.unitCostPerBag) > 0 ? Number(item.unitCostPerBag) : fallbackCostPerBag;
+      const storedTotal = Number(item.itemCOGS) > 0 ? Number(item.itemCOGS) : 0;
+      const total = storedTotal > 0 ? storedTotal : round2(bags * costPerBag);
       const row = rows.get(String(item.productId)) ?? { productId: String(item.productId), productName: item.productName, bags: 0, bagWeight, costPerBag, total: 0 };
       row.bags += bags;
-      row.total = round2(row.total + bags * costPerBag);
+      row.total = round2(row.total + total);
       rows.set(String(item.productId), row);
     }
   }
   const items = Array.from(rows.values())
-    .map((row) => ({ ...row, costPerBag: round2(row.total / row.bags) }))
+    .map((row) => ({ ...row, costPerBag: row.bags > 0 ? round2(row.total / row.bags) : 0 }))
     .sort((a, b) => b.total - a.total);
   return { total: round2(items.reduce((sum, row) => sum + row.total, 0)), items };
 }
@@ -298,5 +301,30 @@ export function calcPurchaseSummary(purchases, range) {
     transportCharges,
     otherCharges,
     netTotal: round2(total - discount + transportCharges + otherCharges),
+  };
+}
+
+export function calcProfitSummary(sales, range) {
+  const activeSales = sales.filter((s) => isActiveSale(s) && inRange(s.saleDate, range));
+  let totalRevenue = 0;
+  let totalCOGS = 0;
+  let totalProfit = 0;
+  let salesWithProfit = 0;
+  for (const sale of activeSales) {
+    const grandTotal = Number(sale.grandTotal) || 0;
+    const cogs = Number(sale.costOfGoodsSold) || 0;
+    const profit = Number(sale.grossProfit) || 0;
+    totalRevenue += grandTotal;
+    totalCOGS += cogs;
+    totalProfit += profit;
+    if (Number(sale.costOfGoodsSold) > 0) salesWithProfit++;
+  }
+  return {
+    totalRevenue: round2(totalRevenue),
+    totalCOGS: round2(totalCOGS),
+    totalProfit: round2(totalProfit),
+    profitMargin: totalRevenue > 0 ? round2((totalProfit / totalRevenue) * 100) : 0,
+    salesCount: activeSales.length,
+    salesWithProfit,
   };
 }

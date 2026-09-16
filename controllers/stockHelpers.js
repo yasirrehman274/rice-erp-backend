@@ -102,3 +102,26 @@ export async function syncWarehouseStats(warehouseId) {
   const productCount = items.filter((i) => i.currentStock > 0).length;
   await Warehouse.updateOne({ _id: warehouseId }, { $set: { totalStock, productCount, occupiedCapacity: totalStock } });
 }
+
+export async function assertWarehouseCapacity({ warehouseId, incomingBags = 0, excludeBags = 0, label = "Stock entry" }) {
+  const incoming = Number(incomingBags) || 0;
+  if (!warehouseId || incoming <= 0) return;
+  const warehouse = await Warehouse.findById(warehouseId).lean();
+  const capacity = Number(warehouse?.capacity) || 0;
+  if (!warehouse || capacity < 1) return;
+
+  const items = await InventoryItem.find({ warehouseId }).lean();
+  const currentStock = items.reduce((sum, i) => sum + (Number(i.currentStock) || 0), 0);
+  const excluded = Math.min(Number(excludeBags) || 0, currentStock);
+  const effectiveStock = Math.max(0, currentStock - excluded);
+  const after = effectiveStock + incoming;
+
+  if (after > capacity) {
+    const available = Math.max(0, capacity - effectiveStock);
+    const error = new Error(
+      `Warehouse capacity exceeded at "${warehouse.name}". Capacity: ${capacity} bags, Current stock: ${currentStock} bags, Requested incoming: ${incoming} bags, Available space: ${available} bags.`,
+    );
+    error.status = 400;
+    throw error;
+  }
+}

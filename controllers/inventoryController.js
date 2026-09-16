@@ -11,6 +11,7 @@ import {
   decrementInventory,
   syncProductStock,
   syncWarehouseStats,
+  assertWarehouseCapacity,
 } from "./stockHelpers.js";
 
 async function nextIdFor(model, prefix) {
@@ -101,6 +102,13 @@ export async function adjustStock(req, res) {
     return res.status(400).json({ message: `Cannot decrease more than the current stock (${item.currentStock}).` });
   }
   const delta = adjustmentType === "increase" ? numQuantity : -numQuantity;
+  if (adjustmentType === "increase") {
+    await assertWarehouseCapacity({
+      warehouseId: item.warehouseId,
+      incomingBags: numQuantity,
+      label: "Stock adjustment",
+    });
+  }
   const updated = await InventoryItem.findByIdAndUpdate(
     item._id,
     { $inc: { currentStock: delta }, $set: { updatedAt: today() } },
@@ -148,6 +156,11 @@ export async function transferStock(req, res) {
   if (!destination) {
     return res.status(404).json({ message: "Destination warehouse not found." });
   }
+  await assertWarehouseCapacity({
+    warehouseId: destinationWarehouseId,
+    incomingBags: numQuantity,
+    label: "Stock transfer",
+  });
   await decrementInventory({ productId: item.productId, warehouseId: item.warehouseId, quantity: numQuantity });
   await incrementInventory({
     productId: item.productId,

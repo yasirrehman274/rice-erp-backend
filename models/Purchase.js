@@ -52,6 +52,8 @@ const purchaseSchema = new mongoose.Schema(
     },
     supplierId: { type: String, default: "" },
     supplierName: { type: String, default: "", trim: true },
+    brokerId: { type: String, default: "" },
+    brokerName: { type: String, default: "", trim: true },
     warehouseId: { type: String, default: "" },
     warehouseName: { type: String, default: "", trim: true },
     productId: { type: String, default: "" },

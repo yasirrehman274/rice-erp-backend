@@ -1,5 +1,6 @@
 import Purchase from "../models/Purchase.js";
 import Supplier from "../models/Supplier.js";
+import Broker from "../models/Broker.js";
 import Warehouse from "../models/Warehouse.js";
 import Product from "../models/Product.js";
 import {
@@ -8,10 +9,11 @@ import {
   decrementInventory,
   syncProductStock,
   syncWarehouseStats,
+  assertWarehouseCapacity,
 } from "./stockHelpers.js";
 
 function sanitizeBody(body = {}) {
-  const { id, _id, supplierName, warehouseName, productName, payments, ...rest } = body;
+  const { id, _id, supplierName, warehouseName, productName, brokerName, payments, ...rest } = body;
   return rest;
 }
 
@@ -48,15 +50,17 @@ function legacyPayments(purchase) {
 }
 
 async function resolveNames(body) {
-  const [supplier, warehouse, product] = await Promise.all([
+  const [supplier, warehouse, product, broker] = await Promise.all([
     body.supplierId ? Supplier.findById(body.supplierId).lean() : null,
     body.warehouseId ? Warehouse.findById(body.warehouseId).lean() : null,
     body.productId ? Product.findById(body.productId).lean() : null,
+    body.brokerId ? Broker.findById(body.brokerId).lean() : null,
   ]);
   return {
     supplierName: supplier?.name ?? "",
     warehouseName: warehouse?.name ?? "",
     productName: product?.productName ?? "",
+    brokerName: broker?.name ?? "",
   };
 }
 
@@ -141,6 +145,10 @@ function purchaseSummary(doc) {
   return { productName: name, quantity: totalBags };
 }
 
+function totalBags(items) {
+  return items.reduce((sum, item) => sum + (Number(item.quantity) || 0), 0);
+}
+
 async function applyPurchase(doc) {
   if (doc.supplierId && doc.grandTotal > 0) {
     await Supplier.updateOne(
@@ -206,6 +214,7 @@ export async function getAllPurchases(req, res) {
     query.$or = [
       { purchaseNumber: regex },
       { supplierName: regex },
+      { brokerName: regex },
       { productName: regex },
       { "items.productName": regex },
     ];
@@ -228,6 +237,13 @@ export async function createPurchase(req, res) {
   const items = await normalizeItems(body);
   const computed = items ? computedFromItems(items, body) : {};
   const names = await resolveNames(body);
+  if (items?.length && body.warehouseId) {
+    await assertWarehouseCapacity({
+      warehouseId: body.warehouseId,
+      incomingBags: totalBags(items),
+      label: "Purchase",
+    });
+  }
   const purchase = await Purchase.create({ _id: id, ...body, ...computed, ...names });
   await applyPurchase(purchase);
   res.status(201).json(purchase);
@@ -248,6 +264,15 @@ export async function updatePurchase(req, res) {
   const items = await normalizeItems(body);
   const computed = items ? computedFromItems(items, body) : {};
   const names = await resolveNames(body);
+  if (items?.length && body.warehouseId) {
+    const oldIncoming = old.warehouseId && String(old.warehouseId) === String(body.warehouseId) ? totalBags(effectiveItems(old)) : 0;
+    await assertWarehouseCapacity({
+      warehouseId: body.warehouseId,
+      incomingBags: totalBags(items),
+      excludeBags: oldIncoming,
+      label: "Purchase edit",
+    });
+  }
   const purchase = await Purchase.findByIdAndUpdate(
     req.params.id,
     { ...body, ...computed, ...names, updatedAt: today() },
@@ -460,6 +485,7 @@ export async function getPurchaseHistory(req, res) {
         purchaseNumber: p.purchaseNumber,
         date: p.purchaseDate,
         supplierName: p.supplierName,
+        brokerName: p.brokerName,
         productName: summary.productName,
         quantity: summary.quantity,
         amount: p.grandTotal,

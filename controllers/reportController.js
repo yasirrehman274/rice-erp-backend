@@ -15,6 +15,7 @@ import {
   calcInventoryReport,
   calcProfitLoss,
   calcPurchaseSummary,
+  calcProfitSummary,
 } from "../services/reportServices.js";
 
 export async function getDashboardData(req, res) {
@@ -33,6 +34,7 @@ export async function getDashboardData(req, res) {
   const purchaseSummary = calcPurchaseSummary(purchases, range);
   const profitLoss = calcProfitLoss({ sales, expenses, inventory, range });
   const inventoryValue = calcInventoryValue({ inventory, products });
+  const profitSummary = calcProfitSummary(sales, range);
 
   res.status(200).json({
     period: range,
@@ -55,6 +57,14 @@ export async function getDashboardData(req, res) {
       operatingExpenses: profitLoss.operatingExpenses,
       expenseCount: profitLoss.expenseCount,
       netProfit: profitLoss.netProfit,
+    },
+    profitSummary: {
+      totalRevenue: profitSummary.totalRevenue,
+      totalCOGS: profitSummary.totalCOGS,
+      totalProfit: profitSummary.totalProfit,
+      profitMargin: profitSummary.profitMargin,
+      salesCount: profitSummary.salesCount,
+      salesWithProfit: profitSummary.salesWithProfit,
     },
     inventoryValue: {
       totalBags: inventoryValue.totalBags,
@@ -147,4 +157,11 @@ export async function getCogsReport(req, res) {
       totalValue: valuation.totalValue,
     },
   });
+}
+
+export async function getProfitSummary(req, res) {
+  const sales = await Sale.find({}).lean();
+  const range = resolveDateRange(req.query);
+  const summary = calcProfitSummary(sales, range);
+  res.status(200).json({ period: range, ...summary });
 }

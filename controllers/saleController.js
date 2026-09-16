@@ -1,5 +1,6 @@
 import Sale from "../models/Sale.js";
 import Customer from "../models/Customer.js";
+import Broker from "../models/Broker.js";
 import Warehouse from "../models/Warehouse.js";
 import Product from "../models/Product.js";
 import InventoryItem from "../models/InventoryItem.js";
@@ -11,8 +12,43 @@ import {
   syncWarehouseStats,
 } from "./stockHelpers.js";
 
+function round2(n) {
+  return Math.round((n + Number.EPSILON) * 100) / 100;
+}
+
+async function calculateSaleProfit(saleDoc, items) {
+  const warehouseId = saleDoc.warehouseId;
+  if (!warehouseId || !items || items.length === 0) {
+    return { costOfGoodsSold: 0, grossProfit: 0, profitMargin: 0, items };
+  }
+  const productIds = [...new Set(items.map((i) => i.productId).filter(Boolean))];
+  if (productIds.length === 0) {
+    return { costOfGoodsSold: 0, grossProfit: 0, profitMargin: 0, items };
+  }
+  const inventoryItems = await InventoryItem.find({
+    productId: { $in: productIds },
+    warehouseId,
+  }).lean();
+  const costMap = new Map(inventoryItems.map((i) => [i.productId, Number(i.averageCostPerKG) || 0]));
+  let totalCOGS = 0;
+  const updatedItems = items.map((item) => {
+    const costPerKG = costMap.get(item.productId) ?? 0;
+    const bagWeight = Number(item.bagWeight) || 0;
+    const quantity = Number(item.quantity) || 0;
+    const unitCostPerBag = round2(costPerKG * bagWeight);
+    const itemCOGS = round2(quantity * unitCostPerBag);
+    const itemProfit = round2(item.subtotal - itemCOGS);
+    totalCOGS += itemCOGS;
+    return { ...item, unitCostPerBag, itemCOGS, itemProfit };
+  });
+  const grandTotal = Number(saleDoc.grandTotal) || 0;
+  const grossProfit = round2(grandTotal - totalCOGS);
+  const profitMargin = grandTotal > 0 ? round2((grossProfit / grandTotal) * 100) : 0;
+  return { costOfGoodsSold: round2(totalCOGS), grossProfit, profitMargin, items: updatedItems };
+}
+
 function sanitizeBody(body = {}) {
-  const { id, _id, customerName, warehouseName, productName, payments, ...rest } = body;
+  const { id, _id, customerName, warehouseName, productName, displayProductName, brokerName, payments, ...rest } = body;
   return rest;
 }
 
@@ -38,15 +74,17 @@ function paymentBasedStatus(sale) {
 }
 
 async function resolveNames(body) {
-  const [customer, warehouse, product] = await Promise.all([
+  const [customer, warehouse, product, broker] = await Promise.all([
     body.customerId ? Customer.findById(body.customerId).lean() : null,
     body.warehouseId ? Warehouse.findById(body.warehouseId).lean() : null,
     body.productId ? Product.findById(body.productId).lean() : null,
+    body.brokerId ? Broker.findById(body.brokerId).lean() : null,
   ]);
   return {
     customerName: customer?.name ?? "",
     warehouseName: warehouse?.name ?? "",
     productName: product?.productName ?? "",
+    brokerName: broker?.name ?? "",
   };
 }
 
@@ -60,10 +98,12 @@ async function normalizeItems(body) {
     const quantity = Number(item.quantity) || 0;
     const bagWeight = Number(item.bagWeight) || 0;
     const price = Number(item.currentSalePrice) || 0;
+    const actualName = names.get(item.productId) ?? item.productName ?? "";
     return {
       id: item.id || `itm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       productId: item.productId ?? "",
-      productName: names.get(item.productId) ?? item.productName ?? "",
+      productName: actualName,
+      displayProductName: String(item.displayProductName ?? "").trim() || actualName,
       quantity,
       bagWeight,
       totalWeight: quantity * bagWeight,
@@ -81,6 +121,7 @@ function effectiveItems(doc) {
       id: `itm-${doc._id}-1`,
       productId: doc.productId,
       productName: doc.productName,
+      displayProductName: doc.displayProductName || doc.productName || "",
       quantity: doc.quantity,
       bagWeight: doc.bagWeight,
       totalWeight: doc.totalWeight,
@@ -104,6 +145,7 @@ function computedFromItems(items, body) {
     items,
     productId: first.productId,
     productName: first.productName,
+    displayProductName: first.displayProductName || first.productName || "",
     quantity: first.quantity,
     bagWeight: first.bagWeight,
     totalWeight: first.totalWeight,
@@ -202,7 +244,15 @@ export async function getAllSales(req, res) {
   const query = {};
   if (search) {
     const regex = new RegExp(search, "i");
-    query.$or = [{ saleNumber: regex }, { customerName: regex }, { productName: regex }];
+    query.$or = [
+      { saleNumber: regex },
+      { customerName: regex },
+      { brokerName: regex },
+      { productName: regex },
+      { displayProductName: regex },
+      { "items.productName": regex },
+      { "items.displayProductName": regex },
+    ];
   }
   const sales = await Sale.find(query).sort({ saleDate: -1, createdAt: -1 });
   res.status(200).json(sales);
@@ -229,6 +279,7 @@ export async function createSale(req, res) {
     ...computed,
   }).check();
   const names = await resolveNames(body);
+  if (!items) body.displayProductName = names.productName;
   const initialReceived = Number(body.receivedAmount) || 0;
   body.status = paymentBasedStatus({ ...body, ...computed, receivedAmount: initialReceived });
   const payments = initialReceived > 0 ? [{
@@ -237,7 +288,15 @@ export async function createSale(req, res) {
   }] : [];
   const sale = await Sale.create({ _id: id, ...body, ...computed, ...names, payments });
   await applySale(sale);
-  res.status(201).json(sale);
+  const saleDoc = await Sale.findById(id);
+  const itemsForProfit = effectiveItems(saleDoc);
+  const profit = await calculateSaleProfit(saleDoc, itemsForProfit);
+  const updated = await Sale.findByIdAndUpdate(
+    id,
+    { $set: { costOfGoodsSold: profit.costOfGoodsSold, grossProfit: profit.grossProfit, profitMargin: profit.profitMargin, items: profit.items, updatedAt: today() } },
+    { new: true },
+  );
+  res.status(201).json(updated);
 }
 
 export async function importSale(req, res) {
@@ -262,6 +321,7 @@ export async function updateSale(req, res) {
     ...computed,
   }).check();
   const names = await resolveNames(body);
+  if (!items) body.displayProductName = names.productName;
   body.status = paymentBasedStatus({ ...body, ...computed });
   await reverseSale(old);
   const sale = await Sale.findByIdAndUpdate(
@@ -270,7 +330,15 @@ export async function updateSale(req, res) {
     { new: true, runValidators: true },
   );
   await applySale(sale);
-  res.status(200).json(sale);
+  const saleDoc = await Sale.findById(req.params.id);
+  const itemsForProfit = effectiveItems(saleDoc);
+  const profit = await calculateSaleProfit(saleDoc, itemsForProfit);
+  const updated = await Sale.findByIdAndUpdate(
+    req.params.id,
+    { $set: { costOfGoodsSold: profit.costOfGoodsSold, grossProfit: profit.grossProfit, profitMargin: profit.profitMargin, items: profit.items, updatedAt: today() } },
+    { new: true },
+  );
+  res.status(200).json(updated);
 }
 
 export async function deleteSale(req, res) {
@@ -371,7 +439,9 @@ export async function getSaleHistory(req, res) {
       saleNumber: s.saleNumber,
       date: s.saleDate,
       customerName: s.customerName,
+      brokerName: s.brokerName,
       productName: s.productName,
+      displayProductName: s.displayProductName || s.productName,
       quantity: s.quantity,
       amount: s.grandTotal,
       status: s.status,
